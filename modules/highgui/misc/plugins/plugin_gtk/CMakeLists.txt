@@ -23,6 +23,19 @@ else()
   message(FATAL_ERROR "Missing dependency target for GTK libraries")
 endif()
 ocv_create_plugin(highgui "opencv_highgui_gtk" "${__deps}" "GTK" "src/window_gtk.cpp")
+if(WITH_OPENGL)
+  if(HAVE_GTK3
+      AND TARGET ocv.3rdparty.gtk_opengl
+      AND NOT OPENCV_GTK_DISABLE_OPENGL
+  )
+    message(STATUS "OpenGL: YES")
+    target_link_libraries(${OPENCV_PLUGIN_NAME} PRIVATE
+        ocv.3rdparty.gtk_opengl
+    )
+  else()
+    message(WARNING "OpenGL dependencies are not available!")
+  endif()
+endif()
 
 if(HAVE_GTK3)
   message(STATUS "GTK3+: ver ${GTK3_VERSION}")

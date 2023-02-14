@@ -46,11 +46,14 @@
 
 #include <gtk/gtk.h>
 
-#undef HAVE_OPENGL  // no support with GTK3
-
 #include <gdk/gdkkeysyms.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <stdio.h>
+
+#ifdef HAVE_OPENGL
+    #include <GL/gl.h>
+    #include <GL/glu.h>
+#endif
 
 #include <opencv2/core/utils/logger.hpp>
 #include "opencv2/imgproc.hpp"
@@ -78,7 +81,8 @@ typedef struct _CvImageWidget        CvImageWidget;
 typedef struct _CvImageWidgetClass   CvImageWidgetClass;
 
 struct _CvImageWidget {
-    GtkWidget widget;
+    GtkWidget parent_instance;
+
     CvMat * original_image;
     CvMat * scaled_image;
     int flags;
@@ -93,17 +97,16 @@ struct _CvImageWidgetClass
 /** Allocate new image viewer widget */
 GtkWidget*     cvImageWidgetNew      (int flags);
 
-// standard GTK object macros
-#define CV_IMAGE_WIDGET(obj)          G_TYPE_CHECK_INSTANCE_CAST (obj, cvImageWidget_get_type (), CvImageWidget)
-#define CV_IMAGE_WIDGET_CLASS(klass)  GTK_CHECK_CLASS_CAST (klass, cvImageWidget_get_type (), CvImageWidgetClass)
-#define CV_IS_IMAGE_WIDGET(obj)       G_TYPE_CHECK_INSTANCE_TYPE (obj, cvImageWidget_get_type ())
+/* Standard GObject macros */
+#define CV_TYPE_IMAGE_WIDGET (cvImageWidget_get_type ())
+#define CV_IMAGE_WIDGET(obj) (G_TYPE_CHECK_INSTANCE_CAST ((obj), CV_TYPE_IMAGE_WIDGET, CvImageWidget))
+#define CV_IS_IMAGE_WIDGET(obj) (G_TYPE_CHECK_INSTANCE_TYPE ((obj), CV_TYPE_IMAGE_WIDGET))
+GType cvImageWidget_get_type (void);
+G_DEFINE_TYPE(CvImageWidget, cvImageWidget, GTK_TYPE_WIDGET)
 
 /////////////////////////////////////////////////////////////////////////////
 // Private API ////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////
-GType        cvImageWidget_get_type (void);
-
-static GtkWidgetClass * parent_class = NULL;
 
 // flag to help size initial window
 #define CV_WINDOW_NO_IMAGE 2
@@ -144,7 +147,7 @@ cvImageWidgetNew (int flags)
 {
   CvImageWidget *image_widget;
 
-  image_widget = CV_IMAGE_WIDGET( gtk_widget_new (cvImageWidget_get_type (), NULL) );
+  image_widget = CV_IMAGE_WIDGET( g_object_new (CV_TYPE_IMAGE_WIDGET, NULL) );
   CV_Assert(image_widget && "GTK widget creation is failed. Ensure that there is no GTK2/GTK3/GTK4 libraries conflict");
   image_widget->original_image = 0;
   image_widget->scaled_image = 0;
@@ -360,16 +363,51 @@ cvImageWidget_destroy (GtkWidget *object)
   cvReleaseMat( &image_widget->scaled_image );
   cvReleaseMat( &image_widget->original_image );
 
-  if (GTK_WIDGET_CLASS (parent_class)->destroy)
-    (* GTK_WIDGET_CLASS (parent_class)->destroy) (object);
+  if (GTK_WIDGET_CLASS (cvImageWidget_parent_class)->destroy)
+    GTK_WIDGET_CLASS (cvImageWidget_parent_class)->destroy (object);
 }
 
-static void cvImageWidget_class_init (gpointer g_class, gpointer /*class_data*/)
+static gboolean
+cvImageWidget_draw (GtkWidget *widget,
+                    cairo_t   *cr)
 {
-  CvImageWidgetClass* klass = (CvImageWidgetClass*)g_class;
-  GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
+  CvImageWidget *image_widget = NULL;
+  GdkPixbuf *pixbuf = NULL;
 
-  parent_class = GTK_WIDGET_CLASS( g_type_class_peek (gtk_widget_get_type ()) );
+  g_return_val_if_fail (widget != NULL, FALSE);
+  g_return_val_if_fail (CV_IS_IMAGE_WIDGET (widget), FALSE);
+
+  image_widget = CV_IMAGE_WIDGET (widget);
+
+  if( image_widget->scaled_image ){
+      // center image in available region
+      int x0 = (gtk_widget_get_allocated_width(widget) - image_widget->scaled_image->cols)/2;
+      int y0 = (gtk_widget_get_allocated_height(widget) - image_widget->scaled_image->rows)/2;
+
+      pixbuf = gdk_pixbuf_new_from_data(image_widget->scaled_image->data.ptr, GDK_COLORSPACE_RGB, false,
+          8, MIN(image_widget->scaled_image->cols, gtk_widget_get_allocated_width(widget)),
+          MIN(image_widget->scaled_image->rows, gtk_widget_get_allocated_height(widget)),
+          image_widget->scaled_image->step, NULL, NULL);
+
+      gdk_cairo_set_source_pixbuf(cr, pixbuf, x0, y0);
+  }
+  else if( image_widget->original_image ){
+      pixbuf = gdk_pixbuf_new_from_data(image_widget->original_image->data.ptr, GDK_COLORSPACE_RGB, false,
+          8, MIN(image_widget->original_image->cols, gtk_widget_get_allocated_width(widget)),
+          MIN(image_widget->original_image->rows, gtk_widget_get_allocated_height(widget)),
+          image_widget->original_image->step, NULL, NULL);
+      gdk_cairo_set_source_pixbuf(cr, pixbuf, 0, 0);
+  }
+
+  cairo_paint(cr);
+  if(pixbuf)
+      g_object_unref(pixbuf);
+  return TRUE;
+}
+
+static void cvImageWidget_class_init (CvImageWidgetClass *klass)
+{
+  GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
 
   widget_class->destroy = cvImageWidget_destroy;
   widget_class->get_preferred_width = cvImageWidget_get_preferred_width;
@@ -380,35 +418,15 @@ static void cvImageWidget_class_init (gpointer g_class, gpointer /*class_data*/)
   widget_class->button_press_event = NULL;
   widget_class->button_release_event = NULL;
   widget_class->motion_notify_event = NULL;
+  widget_class->draw = cvImageWidget_draw;
 }
 
 static void
-cvImageWidget_init(GTypeInstance* instance, gpointer /*g_class*/)
+cvImageWidget_init(CvImageWidget* self)
 {
-    CvImageWidget* image_widget = (CvImageWidget*)instance;
-    image_widget->original_image=0;
-    image_widget->scaled_image=0;
-    image_widget->flags=0;
+    (void)self;
 }
 
-GType cvImageWidget_get_type (void){
-  static GType image_type = 0;
-
-  if (!image_type)
-    {
-      image_type = g_type_register_static_simple(
-          GTK_TYPE_WIDGET,
-          (gchar*) "CvImageWidget",
-          sizeof(CvImageWidgetClass),
-          cvImageWidget_class_init,
-          sizeof(CvImageWidget),
-          cvImageWidget_init,
-          (GTypeFlags)0
-          );
-    }
-
-  return image_type;
-}
 /////////////////////////////////////////////////////////////////////////////
 // End CvImageWidget
 /////////////////////////////////////////////////////////////////////////////
@@ -460,13 +478,16 @@ struct CvWindow : CvUIBase
         widget(NULL), frame(NULL), paned(NULL), name(window_name),
         last_key(0), flags(0), status(0),
         on_mouse(NULL), on_mouse_param(NULL)
+#ifdef HAVE_OPENGL
+        , glDrawCallback(NULL), glDrawData(NULL)
+#endif
     {
         CV_LOG_INFO(NULL, "OpenCV/UI: creating GTK window: " << window_name);
     }
     ~CvWindow();
     void destroy();
 
-    GtkWidget* widget;
+    GtkWidget* widget; // cvImageWidget or GtkGLArea if CV_WINDOW_OPENGL is in flags
     GtkWidget* frame;
     GtkWidget* paned;
     std::string name;
@@ -479,6 +500,10 @@ struct CvWindow : CvUIBase
     void* on_mouse_param;
 
     std::vector< std::shared_ptr<CvTrackbar> > trackbars;
+#ifdef HAVE_OPENGL
+    CvOpenGlDrawCallback glDrawCallback;
+    void* glDrawData;
+#endif
 };
 
 
@@ -486,6 +511,9 @@ static gboolean icvOnClose( GtkWidget* widget, GdkEvent* event, gpointer user_da
 static gboolean icvOnKeyPress( GtkWidget* widget, GdkEventKey* event, gpointer user_data );
 static void icvOnTrackbar( GtkWidget* widget, gpointer user_data );
 static gboolean icvOnMouse( GtkWidget *widget, GdkEvent *event, gpointer user_data );
+#ifdef HAVE_OPENGL
+static void icvOnRender( GtkGLArea *area, GdkGLContext *context, gpointer user_data );
+#endif
 
 int thread_started=0;
 static gpointer icvWindowThreadLoop(gpointer data);
@@ -614,12 +642,18 @@ CvRect cvGetWindowRect_GTK(const char* name)
 
 static Rect getImageRect_(const std::shared_ptr<CvWindow>& window)
 {
-    CV_Assert(window);
-
     gint wx, wy;
 
+    CV_Assert(window);
+
+    gtk_widget_translate_coordinates(window->widget, gtk_widget_get_toplevel(window->widget), 0, 0, &wx, &wy);
+#ifdef HAVE_OPENGL
+    if (window->flags & CV_WINDOW_OPENGL) {
+        return Rect(wx, wy, gtk_widget_get_allocated_width(window->widget), window->widget->allocation.height);
+    }
+#endif
+
     CvImageWidget * image_widget = CV_IMAGE_WIDGET( window->widget );
-    gtk_widget_translate_coordinates(&image_widget->widget, gtk_widget_get_toplevel(&image_widget->widget), 0, 0, &wx, &wy);
     if (image_widget->scaled_image) {
       return Rect(wx, wy, MIN(image_widget->scaled_image->cols, gtk_widget_get_allocated_width(window->widget)),
           MIN(image_widget->scaled_image->rows, gtk_widget_get_allocated_height(window->widget)));
@@ -738,49 +772,21 @@ static double getRatioWindow_(const std::shared_ptr<CvWindow>& window)
 
 double cvGetOpenGlProp_GTK(const char* name)
 {
+#ifdef HAVE_OPENGL
+    CV_Assert(name && "NULL name string");
+
+    CV_LOCK_MUTEX();
+
+    const auto window = icvFindWindowByName(name);
+    if (!window)
+        return -1; // keep silence here
+
+    double result = (window->flags & CV_WINDOW_OPENGL) != 0 ? -1 : 0;
+    return result;
+#else
     (void)name;
     return -1;
-}
-
-
-// OpenGL support
-
-static gboolean cvImageWidget_draw(GtkWidget* widget, cairo_t *cr, gpointer data)
-{
-  (void)data;
-
-  CvImageWidget *image_widget = NULL;
-  GdkPixbuf *pixbuf = NULL;
-
-  g_return_val_if_fail (widget != NULL, FALSE);
-  g_return_val_if_fail (CV_IS_IMAGE_WIDGET (widget), FALSE);
-
-  image_widget = CV_IMAGE_WIDGET (widget);
-
-  if( image_widget->scaled_image ){
-      // center image in available region
-      int x0 = (gtk_widget_get_allocated_width(widget) - image_widget->scaled_image->cols)/2;
-      int y0 = (gtk_widget_get_allocated_height(widget) - image_widget->scaled_image->rows)/2;
-
-      pixbuf = gdk_pixbuf_new_from_data(image_widget->scaled_image->data.ptr, GDK_COLORSPACE_RGB, false,
-          8, MIN(image_widget->scaled_image->cols, gtk_widget_get_allocated_width(widget)),
-          MIN(image_widget->scaled_image->rows, gtk_widget_get_allocated_height(widget)),
-          image_widget->scaled_image->step, NULL, NULL);
-
-      gdk_cairo_set_source_pixbuf(cr, pixbuf, x0, y0);
-  }
-  else if( image_widget->original_image ){
-      pixbuf = gdk_pixbuf_new_from_data(image_widget->original_image->data.ptr, GDK_COLORSPACE_RGB, false,
-          8, MIN(image_widget->original_image->cols, gtk_widget_get_allocated_width(widget)),
-          MIN(image_widget->original_image->rows, gtk_widget_get_allocated_height(widget)),
-          image_widget->original_image->step, NULL, NULL);
-      gdk_cairo_set_source_pixbuf(cr, pixbuf, 0, 0);
-  }
-
-  cairo_paint(cr);
-  if(pixbuf)
-      g_object_unref(pixbuf);
-  return TRUE;
+#endif
 }
 
 static std::shared_ptr<CvWindow> namedWindow_(const std::string& name, int flags);
@@ -803,6 +809,7 @@ CV_IMPL int cvNamedWindow( const char* name, int flags )
 static std::shared_ptr<CvWindow> namedWindow_(const std::string& name, int flags)
 {
     cvInitSystem(0, NULL);
+    flags = flags|CV_WINDOW_OPENGL;
 
     auto window_ptr = std::make_shared<CvWindow>(name);
     CvWindow* window = window_ptr.get();
@@ -812,7 +819,14 @@ static std::shared_ptr<CvWindow> namedWindow_(const std::string& name, int flags
     window->frame = gtk_window_new( GTK_WINDOW_TOPLEVEL );
 
     window->paned = gtk_vbox_new( FALSE, 0 );
-    window->widget = cvImageWidgetNew( flags );
+    if (flags & CV_WINDOW_OPENGL)
+#ifdef HAVE_OPENGL
+        window->widget = gtk_gl_area_new ();
+#else
+        CV_Error( CV_OpenGlNotSupported, "Library was built without OpenGL support" );
+#endif
+    else
+        window->widget = cvImageWidgetNew( flags );
     gtk_box_pack_end( GTK_BOX(window->paned), window->widget, TRUE, TRUE, 0 );
     gtk_widget_show( window->widget );
     gtk_container_add( GTK_CONTAINER(window->frame), window->paned );
@@ -836,8 +850,11 @@ static std::shared_ptr<CvWindow> namedWindow_(const std::string& name, int flags
                         G_CALLBACK(icvOnMouse), window );
     g_signal_connect( window->frame, "delete-event",
                         G_CALLBACK(icvOnClose), window );
-    g_signal_connect( window->widget, "draw",
-                        G_CALLBACK(cvImageWidget_draw), window );
+#ifdef HAVE_OPENGL
+    if (window->flags & CV_WINDOW_OPENGL)
+        g_signal_connect( window->widget, "render",
+                            G_CALLBACK (icvOnRender), window);
+#endif
 
 
     gtk_widget_add_events (window->widget, GDK_BUTTON_RELEASE_MASK | GDK_BUTTON_PRESS_MASK | GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK | GDK_SMOOTH_SCROLL_MASK) ;
@@ -986,7 +1003,7 @@ cvShowImage( const char* name, const CvArr* arr )
     if (arr)
     {
     #ifdef HAVE_OPENGL
-        if (window->useGl)
+        if (window->flags & CV_WINDOW_OPENGL)
         {
             cv::imshow(name, cv::cvarrToMat(arr));
             return;
@@ -1513,7 +1530,6 @@ static gboolean icvOnMouse( GtkWidget *widget, GdkEvent *event, gpointer user_da
     CvPoint2D32f pt32f = {-1., -1.};
     CvPoint pt = {-1,-1};
     int cv_event = -1, state = 0, flags = 0;
-    CvImageWidget * image_widget = CV_IMAGE_WIDGET( widget );
 
     if( event->type == GDK_MOTION_NOTIFY )
     {
@@ -1582,6 +1598,8 @@ static gboolean icvOnMouse( GtkWidget *widget, GdkEvent *event, gpointer user_da
 
     if( cv_event >= 0 )
     {
+        CvImageWidget * image_widget = CV_IMAGE_WIDGET( widget );
+
         // scale point if image is scaled
         if( (image_widget->flags & CV_WINDOW_AUTOSIZE)==0 &&
              image_widget->original_image &&
@@ -1624,6 +1642,25 @@ static gboolean icvOnMouse( GtkWidget *widget, GdkEvent *event, gpointer user_da
     return FALSE;
 }
 
+// OpenGL support
+
+#ifdef HAVE_OPENGL
+
+static gboolean icvOnRender( GtkGLArea *area, GdkGLContext *context, gpointer user_data )
+{
+    CvWindow* window = (CvWindow*)user_data;
+
+    glClearColor (0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    if (window->glDrawCallback)
+        window->glDrawCallback(window->glDrawData);
+
+    glFlush();
+    return TRUE;
+}
+
+#endif // HAVE_OPENGL
 
 static gboolean icvAlarm( gpointer user_data )
 {
